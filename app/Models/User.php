@@ -9,19 +9,29 @@ use Egal\Auth\Traits\Authenticatable;
 use Egal\Exception\LoginAuthException;
 use Egal\Exception\TokenExpiredAuthException;
 use Egal\Exception\UserNotFoundAuthException;
+use Egal\Exception\ValidateException;
 use Egal\Model\Model;
 use Egal\Model\Traits\UsesUuid;
+use Egal\Core\Session;
 use Exception;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
+use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Request;
+use Illuminate\Support\Facades\Validator;
 use Staudenmeir\EloquentHasManyDeep\HasManyDeep;
 use Staudenmeir\EloquentHasManyDeep\HasRelationships;
 
 /**
  * @property $id {@primary-key} {@property-type field}
- * @property $email {@property-type field} {@validation-rules required|string|email|unique:users,email}
+ * @property $name {@property-type field} {@validation-rules required|string}
+ * @property $surname {@property-type field} {@validation-rules required|string}
+ * @property $patronymic {@property-type field} {@validation-rules required|string}
+ * @property $email {@property-type field} {@validation-rules required|string|email|unique:users,email|min:5|max:55}
+ * @property $phone {@property-type field} {@validation-rules required|numeric}
  * @property $password {@property-type field} {@validation-rules required|string}
  * @property $created_at {@property-type field}
  * @property $updated_at {@property-type field}
@@ -34,6 +44,7 @@ use Staudenmeir\EloquentHasManyDeep\HasRelationships;
  * @action login {@statuses-access guest}
  * @action loginByEmailAndPassword {@statuses-access guest}
  * @action actionLoginToService {@statuses-access guest}
+ * @action logout {@statuses-access logged}
  */
 class User extends Model
 {
@@ -44,7 +55,6 @@ class User extends Model
         HasRelationships;
 
     protected $hidden = [
-        'password',
         'created_at',
         'updated_at',
     ];
@@ -54,34 +64,79 @@ class User extends Model
         'updated_at',
     ];
 
+    protected $fillable = [
+        'phone',
+        'email',
+        'password',
+        'password_confirmation'
+    ];
+
+    private static $messages = [
+        'login.required' => 'Введите логин',
+        'login.min' => 'Поле логин должен содержать от 3 до 55 символов',
+        'login.unique' => 'Данный логин уже занят',
+        'password.required' => 'Введите пароль',
+        'password_confirmation.required' => 'Введите пароль еще раз',
+        'phone.required' => 'Введите телефон',
+        'phone.numeric' => 'Поле может содержать только цифры',
+        'phone.digits' => 'Поле должно содержать ровно 11 символов',
+        'password.min' => 'Ваш пароль должен содержать от 6 до 16 символов',
+        'password.max' => 'Ваш пароль должен содержать от 6 до 16 символов',
+        'password.confirmed' => 'Пароли не совпадают',
+        'email.min' => 'Поле должно содержать не менее 5 и не более 50 символов',
+        'email.max' => 'Поле должно содержать не менее 5 и не более 50 символов',
+        'email.email' => 'Введите действительный Email',
+        'email.required' => 'Введите email',
+        "email.unique" => 'Пользователь с данным e-mail уже существует'
+    ];
+
     #region actions
 
     /**
+     * @param string $name
+     * @param string $surname
+     * @param string $patronymic
      * @param string $email
+     * @param string $phone
+     * @param string $password_confirmation
      * @param string $password
-     * @return User
-     * @throws PasswordHashException
      */
-    public static function actionRegister(string $email, string $password): User
+    public static function actionRegister(string $name, string $surname, string $patronymic, string $email, string $password, string $phone, string $password_confirmation)
     {
-        return static::actionRegisterByEmailAndPassword($email, $password);
-    }
+        $fields = [
+            'name' => $name,
+            'surname' => $surname,
+            'patronymic' => $patronymic,
+            'email' => $email,
+            'password' => $password,
+            'phone' => $phone,
+            'password_confirmation' => $password_confirmation
+        ];
 
-    /**
-     * @param string $email
-     * @param string $password
-     * @return User
-     * @throws PasswordHashException
-     * @throws Exception
-     */
-    public static function actionRegisterByEmailAndPassword(string $email, string $password): User
-    {
-        if (!$password) {
-            throw new Exception('Empty password!');
+        $rules = [
+            'name' => 'required|string',
+            'surname' => 'required|string',
+            'patronymic' => 'required|string',
+            'email' => 'required|email|unique:users,email|min:5|max:55',
+            'password' => 'required|confirmed|min:6|max:16',
+            'password_confirmation' => 'required',
+            'phone' => ['required', 'numeric', 'digits:11']
+        ];
+
+        $validator = Validator::make($fields, $rules, self::$messages);
+
+        if ($validator->fails()) {
+            $validatorException = new ValidateException();
+            $validatorException->setMessageBag($validator->errors());
+            throw $validatorException;
         }
 
         $user = new static();
+        $user->name = $name;
+        $user->surname = $surname;
+        $user->patronymic = $patronymic;
         $user->email = $email;
+        $user->phone = $phone;
         $hashedPassword = password_hash($password, PASSWORD_BCRYPT);
 
         if (!$hashedPassword) {
@@ -102,20 +157,45 @@ class User extends Model
      */
     public static function actionLoginByEmailAndPassword(string $email, string $password): string
     {
+        $fields = [
+            'email' => $email,
+            'password' => $password
+        ];
+
+        $rules = [
+            'email' => 'required|email',
+            'password' => 'required'
+        ];
+
+        $validator = Validator::make($fields, $rules, self::$messages);
+
+        if ($validator->fails()) {
+            $validatorException = new ValidateException();
+            $validatorException->setMessageBag($validator->errors());
+            throw $validatorException;
+        }
+
         /** @var User $user */
         $user = self::query()
             ->where('email', '=', $email)
             ->first();
 
         if (!$user || !password_verify($password, $user->password)) {
-            throw new LoginAuthException('Incorrect Email or password!');
+            throw new LoginAuthException('Неправильный Email или пароль');
         }
 
         $umt = new UserMasterToken();
         $umt->setSigningKey(config('app.service_key'));
         $umt->setAuthIdentification($user->getAuthIdentifier());
 
+        Log::createLog(['user_id' => $user->id, 'ip_address' => Request::ip()]);
+
         return $umt->generateJWT();
+    }
+
+    public static function actionLogout()
+    {
+        return 'татар';
     }
 
     /**
@@ -205,3 +285,4 @@ class User extends Model
     }
 
 }
+
